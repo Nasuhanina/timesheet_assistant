@@ -1,0 +1,29 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (Local)",
+      "options": {
+        "baseURL": "http://127.0.0.1:11434/v1"
+      },
+      "models": {
+        "deepseek-coder-v2-tool-calling": {
+          "name": "DeepSeek Coder V2 Tool Calling",
+          "tools": true
+        }
+      }
+    }
+  },
+
+  "model": "MFDoom/deepseek-coder-v2-tool-calling:latest",
+
+  "tools": {
+    "read": true,
+    "write": true,
+    "bash": true,
+    "grep": true,
+    "glob": true
+  }
+}
