@@ -102,7 +102,7 @@ export default function TimesheetForm({ onSaved, refreshKey, activeTab }) {
         activity_time: "",
         work_location: "",
         leave_travel_type: "",
-      time: entry.time || 0,
+      time: prev.time || 0,
       }));
       setEditingId(null);
       setEntries(result.entries);
