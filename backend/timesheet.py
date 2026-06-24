@@ -2,7 +2,8 @@ import uuid
 import io
 from datetime import datetime
 from flask import Blueprint, request, jsonify, session, send_file
-from onedrive_service import save_timesheet, load_timesheets
+from onedrive_service import save_timesheet, load_timesheets, _get_effective_path, _get_access_token as _get_onedrive_token
+import onedrive_service
 from openpyxl import load_workbook
 from document_service import (
     generate_excel,
@@ -10,10 +11,15 @@ from document_service import (
     upload_template,
     download_template,
     get_document_info,
+    list_folder_files,
+    save_entries_to_file,
     _build_workbook,
     _excel_filename,
+    _get_template_filename,
 )
 import gptbots_service
+import settings_store
+from config import Config
 
 timesheet_bp = Blueprint("timesheet", __name__, url_prefix="/api/timesheet")
 
@@ -114,7 +120,8 @@ def add_entry():
     entries = data.get("entries", [])
     entries.append(entry)
 
-    save_timesheet({"entries": entries})
+    if not save_timesheet({"entries": entries}):
+        return jsonify({"error": "Failed to save entry — check permissions"}), 500
     _auto_generate_document()
     return jsonify({"entry": entry, "entries": entries}), 201
 
@@ -187,7 +194,8 @@ def update_entry(entry_id):
     if not found:
         return jsonify({"error": "Entry not found"}), 404
 
-    save_timesheet({"entries": entries})
+    if not save_timesheet({"entries": entries}):
+        return jsonify({"error": "Failed to save entry — check permissions"}), 500
     _auto_generate_document()
     return jsonify({"entries": entries})
 
@@ -201,7 +209,8 @@ def delete_entry(entry_id):
     entries = data.get("entries", [])
     entries = [e for e in entries if e.get("id") != entry_id]
 
-    save_timesheet({"entries": entries})
+    if not save_timesheet({"entries": entries}):
+        return jsonify({"error": "Failed to save entry — check permissions"}), 500
     _auto_generate_document()
     return jsonify({"entries": entries})
 
@@ -699,13 +708,13 @@ def upload_document_template():
         return jsonify({"error": "No file provided"}), 400
 
     file = request.files["file"]
-    if not (file.filename.endswith(".xlsx") or file.filename.endswith(".xlsm")):
+    if not file.filename.lower().endswith((".xlsx", ".xlsm")):
         return jsonify({"error": "Only .xlsx or .xlsm files are accepted as templates"}), 400
 
     file_bytes = file.read()
-    ok = upload_template(file_bytes, file.filename)
+    ok, err = upload_template(file_bytes, file.filename)
     if not ok:
-        return jsonify({"error": "Failed to upload template to OneDrive"}), 500
+        return jsonify({"error": f"Failed to upload template: {err}"}), 500
 
     data = load_timesheets()
     entries = data.get("entries", [])
@@ -731,13 +740,13 @@ def download_document():
     except Exception:
         pass
 
-    filename = _excel_filename(session["user"]["email"], is_macro)
+    dl_name = _get_template_filename() or _excel_filename(session["user"]["email"], is_macro)
     mimetype = "application/vnd.ms-excel.sheet.macroEnabled.12" if is_macro else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     return send_file(
         io.BytesIO(content),
         mimetype=mimetype,
         as_attachment=True,
-        download_name=filename,
+        download_name=dl_name,
     )
 
 
@@ -797,3 +806,168 @@ def generate_document():
     if not ok:
         return jsonify({"error": "Failed to generate document"}), 500
     return jsonify({"message": "Document generated successfully", "file_id": doc_id})
+
+
+@timesheet_bp.route("/documents/list", methods=["GET"])
+def list_documents():
+    if not _ensure_authenticated():
+        return jsonify({"error": "Not authenticated"}), 401
+    effective_path = _get_effective_path()
+    files = list_folder_files()
+    return jsonify({
+        "files": files,
+        "path": effective_path,
+        "count": len(files),
+    })
+
+
+@timesheet_bp.route("/documents/save-to-file", methods=["POST"])
+def save_to_file():
+    if not _ensure_authenticated():
+        return jsonify({"error": "Not authenticated"}), 401
+    body = request.get_json(silent=True)
+    if not body or "filename" not in body:
+        return jsonify({"error": "Missing 'filename' field"}), 400
+    filename = body["filename"].strip()
+    if not filename:
+        return jsonify({"error": "Filename cannot be empty"}), 400
+    data = load_timesheets()
+    entries = data.get("entries", [])
+    ok, detail = save_entries_to_file(entries, filename)
+    if not ok:
+        return jsonify({"error": detail or "Failed to save to file"}), 500
+    return jsonify({"message": f"Entries written to {filename}", "file_id": detail})
+
+
+@timesheet_bp.route("/debug/drive", methods=["GET"])
+def debug_drive():
+    if not _ensure_authenticated():
+        return jsonify({"error": "Not authenticated"}), 401
+    from onedrive_service import _get_drive_base, GRAPH_BASE, _get_effective_path, _ensure_timesheets_folder
+    import requests as req
+    token, _ = onedrive_service._get_access_token()
+    drives_resp = req.get(f"{GRAPH_BASE}/me/drives", headers={"Authorization": f"Bearer {token}"})
+    drives_data = drives_resp.json() if drives_resp.ok else drives_resp.text
+    shared_resp = req.get(f"{GRAPH_BASE}/me/drive/sharedWithMe", headers={"Authorization": f"Bearer {token}"})
+    shared_data = shared_resp.json() if shared_resp.ok else shared_resp.text
+    recent_resp = req.get(f"{GRAPH_BASE}/me/drive/recent", headers={"Authorization": f"Bearer {token}"})
+    recent_data = recent_resp.json() if recent_resp.ok else recent_resp.text
+    drive_base = _get_drive_base()
+    return jsonify({
+        "drive_base": drive_base,
+        "drives_status": drives_resp.status_code,
+        "drives": drives_data,
+        "shared_status": shared_resp.status_code,
+        "shared": shared_data,
+        "recent_status": recent_resp.status_code,
+        "recent": recent_data,
+        "sharepoint_host": Config.SHAREPOINT_SITE_HOST,
+        "sharepoint_path": Config.SHAREPOINT_SITE_PATH,
+        "onedrive_root": Config.ONEDRIVE_ROOT_PATH,
+    })
+
+
+@timesheet_bp.route("/debug/entries-storage", methods=["GET"])
+def debug_entries_storage():
+    if not _ensure_authenticated():
+        return jsonify({"error": "Not authenticated"}), 401
+    from onedrive_service import _get_drive_base, GRAPH_BASE, _get_effective_path, _ensure_timesheets_folder, _get_access_token
+    import requests as req
+    email = session["user"]["email"]
+    effective_path = _get_effective_path()
+    drive_base = _get_drive_base()
+    folder_id = _ensure_timesheets_folder()
+    filename = f"timesheet_{email.replace('@', '_at_')}.json"
+    result = {
+        "email": email,
+        "effective_path": effective_path,
+        "drive_base": drive_base,
+        "folder_id": folder_id,
+        "filename": filename,
+        "folder_children": [],
+        "json_content": None,
+        "json_status": None,
+        "error": None,
+    }
+    if folder_id:
+        try:
+            token, _ = _get_access_token()
+            children = req.get(
+                f"{GRAPH_BASE}{drive_base}/items/{folder_id}/children",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if children.ok:
+                kids = []
+                for c in children.json().get("value", []):
+                    kids.append({"name": c.get("name"), "id": c.get("id")})
+                result["folder_children"] = kids
+        except Exception as e:
+            result["error"] = str(e)
+        try:
+            token, _ = _get_access_token()
+            json_resp = req.get(
+                f"{GRAPH_BASE}{drive_base}/items/{folder_id}:/{filename}:/content",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            result["json_status"] = json_resp.status_code
+            if json_resp.ok:
+                data = json_resp.json()
+                result["json_content"] = {
+                    "entry_count": len(data.get("entries", [])),
+                    "keys": list(data.keys()),
+                }
+        except Exception as e:
+            result["error"] = str(e)
+    return jsonify(result)
+
+
+@timesheet_bp.route("/debug/token-scopes", methods=["GET"])
+def debug_token_scopes():
+    if not _ensure_authenticated():
+        return jsonify({"error": "Not authenticated"}), 401
+    import base64, json
+    try:
+        token, _ = onedrive_service._get_access_token()
+        parts = token.split(".")
+        padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        payload = base64.urlsafe_b64decode(padded)
+        claims = json.loads(payload)
+        return jsonify({
+            "scp": claims.get("scp", "none"),
+            "aud": claims.get("aud", ""),
+            "iss": claims.get("iss", ""),
+            "exp": claims.get("exp", ""),
+            "roles": claims.get("roles", []),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Settings ────────────────────────────────────────────────────
+
+
+@timesheet_bp.route("/settings/path", methods=["GET"])
+def get_settings_path():
+    if not _ensure_authenticated():
+        return jsonify({"error": "Not authenticated"}), 401
+    email = session["user"]["email"]
+    custom = settings_store.get_timesheet_path(email)
+    return jsonify({
+        "path": custom or Config.ONEDRIVE_ROOT_PATH,
+        "is_custom": bool(custom),
+    })
+
+
+@timesheet_bp.route("/settings/path", methods=["PUT"])
+def set_settings_path():
+    if not _ensure_authenticated():
+        return jsonify({"error": "Not authenticated"}), 401
+    body = request.get_json(silent=True)
+    if not body or "path" not in body:
+        return jsonify({"error": "Missing 'path' field"}), 400
+    path = body["path"].strip()
+    if not path:
+        return jsonify({"error": "Path cannot be empty"}), 400
+    email = session["user"]["email"]
+    settings_store.set_timesheet_path(email, path)
+    return jsonify({"path": path, "is_custom": True})

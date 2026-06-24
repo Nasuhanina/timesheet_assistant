@@ -18,6 +18,10 @@ export default function DocumentManager() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const fileRef = useRef(null);
 
+  useEffect(() => {
+    loadInfo();
+  }, []);
+
   const loadInfo = async () => {
     try {
       const data = await getDocumentInfo();
@@ -28,17 +32,13 @@ export default function DocumentManager() {
     setLoading(false);
   };
 
-  useEffect(() => {
-    loadInfo();
-  }, []);
-
   const handleDownload = async () => {
     try {
       const blob = await downloadDocument();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = info?.document_name || "timesheet.xlsx";
+      a.download = info?.document_name || "timesheet.xlsm";
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -54,7 +54,7 @@ export default function DocumentManager() {
     setMessage("");
     try {
       await generateDocument();
-      setMessage("Document regenerated successfully!");
+      setMessage("Entries written into template successfully!");
       await loadInfo();
     } catch (err) {
       setError(err.message);
@@ -77,8 +77,9 @@ export default function DocumentManager() {
   const handleUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    if (!file.name.endsWith(".xlsx") && !file.name.endsWith(".xlsm")) {
-      setError("Please select an .xlsx or .xlsm file");
+    const isExcel = /\.(xlsm|xlsx)$/i.test(file.name);
+    if (!isExcel) {
+      setError("Please select an .xlsm or .xlsx file");
       return;
     }
     setUploading(true);
@@ -86,7 +87,7 @@ export default function DocumentManager() {
     setMessage("");
     try {
       await uploadDocumentTemplate(file);
-      setMessage(`"${file.name}" uploaded — entries written into it.`);
+      setMessage(`"${file.name}" uploaded — entries written into template.`);
       await loadInfo();
     } catch (err) {
       setError(err.message);
@@ -112,88 +113,98 @@ export default function DocumentManager() {
 
   return (
     <div className="document-manager">
-      <div className="document-info-panel">
-        <h2>Timesheet Document</h2>
-        <p className="doc-desc">
-          Your timesheet entries are written directly into the uploaded Excel file.
-          Upload a .xlsm/.xlsx template with your preferred headers &amp; macros.
-          Entries are matched to columns by header name and written starting row 2.
-        </p>
+      <div className="doc-layout">
+        <div className="doc-main-panel">
+          <h2>Timesheet Document</h2>
+          <p className="doc-desc">
+            Upload your own timesheet template (.xlsm or .xlsx). Your entries
+            will be written directly into the template while preserving its
+            original formatting, headers, and layout.
+          </p>
 
-        <div className="doc-status">
-          <div className="doc-status-row">
-            <span className="doc-label">Status:</span>
-            <span className={`doc-value ${info?.has_document ? "status-ok" : "status-missing"}`}>
-              {info?.has_document ? "Available" : "Not yet generated"}
-            </span>
+          <div className="upload-area">
+            <div className="upload-icon">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#4f46e5" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+            </div>
+            <p className="upload-text">
+              {info?.has_template
+                ? "Upload a new template to replace the current one"
+                : "Drop your Excel template here or click to browse"}
+            </p>
+            <p className="upload-hint">Supports .xlsm and .xlsx files</p>
+            <input
+              type="file"
+              accept=".xlsm,.xlsx,application/vnd.ms-excel.sheet.macroEnabled.12,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              onChange={handleUpload}
+              ref={fileRef}
+              disabled={uploading}
+              id="template-upload"
+              className="file-input"
+            />
+            <label htmlFor="template-upload" className="file-label">
+              {uploading ? "Uploading..." : "Choose Template File"}
+            </label>
           </div>
-          <div className="doc-status-row">
-            <span className="doc-label">Entries:</span>
-            <span className="doc-value">{info?.entries_count ?? 0}</span>
+
+          {message && <div className="success">{message}</div>}
+          {error && <div className="error">{error}</div>}
+
+          <div className="doc-status">
+            <div className="doc-status-row">
+              <span className="doc-label">Template:</span>
+              <span className={`doc-value ${info?.has_template ? "status-ok" : "status-missing"}`}>
+                {info?.has_template ? "Uploaded" : "Not uploaded"}
+              </span>
+            </div>
+            <div className="doc-status-row">
+              <span className="doc-label">Entries:</span>
+              <span className="doc-value">{info?.entries_count ?? 0}</span>
+            </div>
+            {info?.has_document && (
+              <>
+                <div className="doc-status-row">
+                  <span className="doc-label">Generated File:</span>
+                  <span className="doc-value status-ok">{info.document_name}</span>
+                </div>
+                <div className="doc-status-row">
+                  <span className="doc-label">Size:</span>
+                  <span className="doc-value">{formatSize(info.document_size)}</span>
+                </div>
+                <div className="doc-status-row">
+                  <span className="doc-label">Last Modified:</span>
+                  <span className="doc-value">{formatDate(info.document_modified)}</span>
+                </div>
+              </>
+            )}
           </div>
-          {info?.has_document && (
-            <>
-              <div className="doc-status-row">
-                <span className="doc-label">Size:</span>
-                <span className="doc-value">{formatSize(info.document_size)}</span>
-              </div>
-              <div className="doc-status-row">
-                <span className="doc-label">Last Modified:</span>
-                <span className="doc-value">{formatDate(info.document_modified)}</span>
-              </div>
-            </>
-          )}
-          <div className="doc-status-row">
-            <span className="doc-label">Template:</span>
-            <span className={`doc-value ${info?.has_template ? "status-ok" : "status-missing"}`}>
-              {info?.has_template ? "Custom template" : "Default format"}
-            </span>
+
+          <div className="doc-actions">
+            <button
+              className="btn btn-primary"
+              onClick={handleGenerate}
+              disabled={generating || !info?.has_template || (info?.entries_count ?? 0) === 0}
+            >
+              {generating ? "Writing..." : "Write Entries to Template"}
+            </button>
+            <button
+              className="btn btn-outline"
+              onClick={handleDownload}
+              disabled={!info?.has_document}
+            >
+              Download Excel
+            </button>
+            <button
+              className="btn btn-outline"
+              onClick={handlePreview}
+              disabled={previewLoading || (info?.entries_count ?? 0) === 0}
+            >
+              {previewLoading ? "Loading..." : "Preview"}
+            </button>
           </div>
-        </div>
-
-        {message && <div className="success">{message}</div>}
-        {error && <div className="error">{error}</div>}
-
-        <div className="doc-actions">
-          <button className="btn btn-primary" onClick={handleDownload} disabled={!info?.has_document}>
-            Download Excel
-          </button>
-          <button
-            className="btn btn-outline"
-            onClick={handlePreview}
-            disabled={previewLoading || (info?.entries_count ?? 0) === 0}
-          >
-            {previewLoading ? "Loading..." : "Preview"}
-          </button>
-          <button
-            className="btn btn-outline"
-            onClick={handleGenerate}
-            disabled={generating || (info?.entries_count ?? 0) === 0}
-          >
-            {generating ? "Generating..." : "Regenerate Now"}
-          </button>
-        </div>
-      </div>
-
-      <div className="document-upload-panel">
-        <h2>Upload Excel &amp; Write Entries</h2>
-        <p className="doc-desc">
-          Upload your .xlsm / .xlsx file. Entries will be written directly into it,
-          preserving all macros, formatting, and existing sheets. Download to get the filled file.
-        </p>
-        <div className="upload-area">
-          <input
-            type="file"
-            accept=".xlsx,.xlsm"
-            onChange={handleUpload}
-            ref={fileRef}
-            disabled={uploading}
-            id="template-upload"
-            className="file-input"
-          />
-          <label htmlFor="template-upload" className="file-label">
-            {uploading ? "Uploading..." : "Choose .xlsx / .xlsm file"}
-          </label>
         </div>
       </div>
 

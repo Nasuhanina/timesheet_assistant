@@ -1,7 +1,10 @@
 import io
 import json
 import os
+import re
 import tempfile
+import zipfile
+from copy import copy as shallow_copy
 from datetime import datetime
 from flask import session
 import requests
@@ -9,9 +12,147 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from config import Config
-from onedrive_service import _headers, _handle_errors
+from onedrive_service import _headers, _handle_errors, _get_effective_path, _get_drive_base
+import settings_store
+
+def _cell_has_style(ws, row, col):
+    """Check if a cell exists in the worksheet (was loaded from file) and is not a merged cell."""
+    if (row, col) not in ws._cells:
+        return False
+    try:
+        _ = ws._cells[(row, col)].value
+        return True
+    except AttributeError:
+        return False
+
+
+def _apply_cell_style(target, source):
+    """Copy formatting from source cell to target cell."""
+    if not source:
+        return
+    try:
+        _ = source.has_style
+    except AttributeError:
+        return
+    if not source.has_style:
+        return
+    try:
+        target.font = shallow_copy(source.font)
+        target.fill = shallow_copy(source.fill)
+        target.border = shallow_copy(source.border)
+        target.alignment = shallow_copy(source.alignment)
+        target.number_format = source.number_format
+    except Exception:
+        pass
+
+
+def _write_template_cell(ws, row, col, value, format_ref_row):
+    """Write a cell value preserving existing formatting, or copying from reference row."""
+    if (row, col) in ws._cells:
+        cell = ws._cells[(row, col)]
+        try:
+            cell.value = value
+        except AttributeError:
+            pass
+        return
+    try:
+        cell = ws.cell(row=row, column=col, value=value)
+    except AttributeError:
+        return
+    if format_ref_row:
+        src = ws.cell(row=format_ref_row, column=col)
+        _apply_cell_style(cell, src)
+
+
+def _clear_data_cells(ws, start_row, data_columns=None):
+    """Clear values from data rows, preserving all cell formatting.
+    Only clears cells in data_columns (set of column numbers) if provided.
+    Skips merged cells."""
+    max_col = ws.max_column if data_columns is None else max(data_columns)
+    for r in range(start_row, ws.max_row + 1):
+        for c in range(1, max_col + 1):
+            if data_columns is not None and c not in data_columns:
+                continue
+            if (r, c) not in ws._cells:
+                continue
+            cell = ws._cells[(r, c)]
+            try:
+                cell.value = None
+            except AttributeError:
+                pass
+
+
+def _normalize_date(val):
+    """Convert various date formats to YYYY-MM-DD string. Returns None if unparseable."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.strftime("%Y-%m-%d")
+    if hasattr(val, 'strftime'):
+        try:
+            return val.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    s = str(val).strip()
+    if not s:
+        return None
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        return s
+    from datetime import date
+    d = None
+    for fmt in ("%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y/%m/%d",
+                "%d/%m/%y", "%d-%b-%Y", "%d-%b-%y", "%d %B %Y"):
+        try:
+            d = datetime.strptime(s, fmt)
+            break
+        except ValueError:
+            continue
+    if d:
+        return d.strftime("%Y-%m-%d")
+    m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m:
+        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    return None
+
+
+def _build_date_row_map(ws, date_col):
+    """Build {normalized_date: row_number} from the template's date column."""
+    date_row_map = {}
+    for r in range(1, ws.max_row + 1):
+        cell = ws.cell(row=r, column=date_col)
+        norm = _normalize_date(cell.value)
+        if norm:
+            date_row_map[norm] = r
+    return date_row_map
+
+
+def _save_workbook(wb, keep_macro=None):
+    """Save workbook to BytesIO, preserving VBA macros if present."""
+    if keep_macro is None:
+        keep_macro = hasattr(wb, 'vbaProject') and wb.vbaProject is not None
+    suffix = ".xlsm" if keep_macro else ".xlsx"
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    try:
+        tmp.close()
+        wb.save(tmp.name)
+        with open(tmp.name, "rb") as f:
+            output = io.BytesIO(f.read())
+        output.seek(0)
+    finally:
+        os.unlink(tmp.name)
+    return output
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+
+
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_XLSM_MIME = "application/vnd.ms-excel.sheet.macroEnabled.12"
+
+
+def _xls_headers(filename):
+    h = _headers()
+    h["Content-Type"] = _XLSM_MIME if filename.lower().endswith(".xlsm") else _XLSX_MIME
+    return h
 
 
 COMBINED_HEADERS = [
@@ -36,8 +177,8 @@ HEADER_FILL_GRAY = PatternFill(start_color="D1D5DB", end_color="D1D5DB", fill_ty
 # Two-row template column layout (row 1 = category, row 2 = field names)
 TEMPLATE_2ROW_LAYOUT = [
     # (group_label, [(field_name, column_number), ...])
-    ("Name", [("user_name", 1)]),
-    ("Date", [("date", 2)]),
+    ("Date", [("date", 1)]),
+    ("Name", [("user_name", 2)]),
     ("Project Document Work #1", [
         ("project_id", 3), ("doc_task_type", 4), ("doc_id", 5),
         ("doc_version", 6), ("doc_type", 7), ("work_time", 8),
@@ -84,50 +225,45 @@ THIN_BORDER = Border(
 )
 
 
-def _ensure_documents_folder():
-    path = Config.ONEDRIVE_ROOT_PATH.strip("/")
-    parts = path.split("/")
-    folder_id = None
+def _ensure_documents_folder(drive_base=None):
+    if drive_base is None:
+        drive_base = _get_drive_base()
+    path = _get_effective_path().strip("/")
+    if not path:
+        return "root"
 
-    for part in parts:
-        if not folder_id:
-            resp = requests.get(
-                f"{GRAPH_BASE}/me/drive/root:/{path}",
-                headers=_headers(),
-            )
-            if resp.ok:
-                folder_id = resp.json().get("id")
-                continue
+    resp = requests.get(
+        f"{GRAPH_BASE}{drive_base}/root:/{path}",
+        headers=_headers(),
+    )
+    if resp.ok:
+        return resp.json().get("id")
 
+    current = "root"
+    for part in path.split("/"):
         create_resp = requests.post(
-            f"{GRAPH_BASE}/me/drive/items/{folder_id or 'root'}/children",
+            f"{GRAPH_BASE}{drive_base}/items/{current}/children",
             headers=_headers(),
             json={"name": part, "folder": {}, "@microsoft.graph.conflictBehavior": "fail"},
         )
         if create_resp.status_code in (200, 201):
-            folder_id = create_resp.json().get("id")
+            current = create_resp.json().get("id")
         else:
-            existing = requests.get(
-                f"{GRAPH_BASE}/me/drive/root:/{path}",
+            check = requests.get(
+                f"{GRAPH_BASE}{drive_base}/items/{current}:/{part}",
                 headers=_headers(),
             )
-            if existing.ok:
-                folder_id = existing.json().get("id")
-    return folder_id
+            if check.ok:
+                current = check.json().get("id")
+            else:
+                return "root"
+    return current
 
 
 def _excel_filename(user_email, is_macro=False):
     safe = user_email.replace("@", "_at_").replace(".", "_dot_")
     ext = ".xlsm" if is_macro else ".xlsx"
     return f"timesheet_{safe}{ext}"
-
-
-def _is_xlsm(template_bytes):
-    return (
-        b"xl/macrosheets" in template_bytes
-        or b"xl/vbaProject.bin" in template_bytes
-        or template_bytes[:2] == b"PK" and b"vbaProject" in template_bytes
-    )
 
 
 DOC_HEADER_MAP = {
@@ -172,9 +308,10 @@ def _build_column_map_two_row(ws, field_map):
         if cell.value:
             val = str(cell.value).strip().lower()
             for field, candidates in field_map.items():
-                if val in [c.lower() for c in candidates]:
-                    col_map.setdefault(field, []).append(cell.column)
-                    break
+                for c in candidates:
+                    if c.lower() in val:
+                        col_map.setdefault(field, []).append(cell.column)
+                        break
     return col_map
 
 
@@ -184,9 +321,10 @@ def _build_column_map(ws, field_map):
         if cell.value:
             val = str(cell.value).strip().lower()
             for field, candidates in field_map.items():
-                if val in [c.lower() for c in candidates]:
-                    col_map[field] = cell.column
-                    break
+                for c in candidates:
+                    if c.lower() in val:
+                        col_map[field] = cell.column
+                        break
     return col_map
 
 
@@ -282,64 +420,10 @@ for field, variants in TEMPLATE_2ROW_EXTRA.items():
                 seen.add(v.lower())
 
 
-def _build_from_template(entries, template_bytes):
-    try:
-        wb = load_workbook(template_bytes, keep_vba=True)
-    except Exception:
-        return _build_from_scratch(entries)
-    ws = wb.active
-
-    if _has_two_row_header(ws):
-        return _build_from_template_2row(entries, wb, template_bytes)
-
-    col_map = _build_column_map(ws, ALL_HEADER_MAP)
-    if not col_map:
-        return _build_from_scratch(entries)
-
-    next_row = 2
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if any(cell is not None for cell in row):
-            next_row += 1
-        else:
-            break
-
-    for entry in entries:
-        for field, col_list in col_map.items():
-            col = col_list[0]
-            if field == "total_time":
-                wt = float(entry.get("work_time", 0) or 0)
-                rt = float(entry.get("reviewer_time", 0) or 0)
-                at = float(entry.get("activity_time", 0) or 0)
-                val = wt + rt + at
-            else:
-                val = entry.get(field, "")
-                if val is None:
-                    val = ""
-            ws.cell(row=next_row, column=col, value=val)
-        next_row += 1
-
-    is_macro = _is_xlsm(template_bytes)
-    ext = ".xlsm" if is_macro else ".xlsx"
-
-    tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-    try:
-        tmp.close()
-        wb.save(tmp.name)
-        with open(tmp.name, "rb") as f:
-            output = io.BytesIO(f.read())
-        output.seek(0)
-    finally:
-        os.unlink(tmp.name)
-
-    return output, is_macro
-
-
-def _build_from_template_2row(entries, wb, template_bytes):
-    ws = wb.active
-
-    col_map = _build_column_map_two_row(ws, ALL_HEADER_MAP)
-    if not col_map:
-        return _build_from_scratch(entries)
+def _write_positional_fallback(ws, entries):
+    """Write entries to worksheet using default column positions, matching by date row."""
+    date_row_map = _build_date_row_map(ws, 1)
+    REF_ROW = 2 if ws.max_row >= 2 else 1
 
     grouped = {}
     for e in entries:
@@ -348,40 +432,171 @@ def _build_from_template_2row(entries, wb, template_bytes):
             grouped[d] = []
         grouped[d].append(e)
 
-    sorted_dates = sorted(grouped.keys())
-
-    next_row = 3
-    for row in ws.iter_rows(min_row=3, values_only=True):
-        if any(cell is not None for cell in row):
-            next_row += 1
-        else:
-            break
-
-    for date_str in sorted_dates:
-        day_entries = grouped[date_str]
+    for date_str, day_entries in grouped.items():
+        row = date_row_map.get(date_str)
+        if row is None:
+            continue
         doc_entries = [e for e in day_entries if e.get("activity_type") not in ("other", "leave_travel")]
         other_entries = [e for e in day_entries if e.get("activity_type") == "other"]
         leave_entries = [e for e in day_entries if e.get("activity_type") == "leave_travel"]
 
-        if "date" in col_map and col_map["date"]:
-            ws.cell(row=next_row, column=col_map["date"][0], value=date_str)
-
-        if "user_name" in col_map and col_map["user_name"]:
-            name_val = doc_entries[0].get("user_name", "") if doc_entries else (other_entries[0].get("user_name", "") if other_entries else (leave_entries[0].get("user_name", "") if leave_entries else ""))
-            ws.cell(row=next_row, column=col_map["user_name"][0], value=name_val)
-
-        if "leave_travel" in col_map and col_map["leave_travel"]:
-            leave_val = ", ".join(e.get("leave_travel_type", "") for e in leave_entries) if leave_entries else ""
-            ws.cell(row=next_row, column=col_map["leave_travel"][0], value=leave_val)
+        user_name = next((e.get("user_name", "") for e in day_entries if e.get("user_name")), "")
+        if user_name:
+            _write_template_cell(ws, row, 2, user_name, REF_ROW)
 
         doc_fields = ["project_id", "doc_task_type", "doc_id", "doc_version",
                       "doc_type", "work_time", "reviewer_time", "doc_status"]
 
-        def get_col(field, slot_index):
-            lst = col_map.get(field, [])
-            if slot_index < len(lst):
-                return lst[slot_index]
-            return None
+        for slot_i in range(2):
+            entry = doc_entries[slot_i] if slot_i < len(doc_entries) else None
+            base_col = 3 + slot_i * 8
+            if entry:
+                for fi, field in enumerate(doc_fields):
+                    val = entry.get(field)
+                    if val:
+                        _write_template_cell(ws, row, base_col + fi, val, REF_ROW)
+
+        act_fields = ["activity_code", "project_id", "activity_time"]
+
+        for slot_i in range(3):
+            entry = other_entries[slot_i] if slot_i < len(other_entries) else None
+            base_col = 19 + slot_i * 3
+            if entry:
+                for fi, field in enumerate(act_fields):
+                    val = entry.get(field)
+                    if val:
+                        _write_template_cell(ws, row, base_col + fi, val, REF_ROW)
+
+        locations = set()
+        for e in day_entries:
+            loc = e.get("work_location", "")
+            if loc:
+                locations.add(loc)
+        if locations:
+            _write_template_cell(ws, row, 28, ", ".join(sorted(locations)), REF_ROW)
+
+        total_work = sum(float(e.get("work_time", 0) or 0) for e in doc_entries)
+        total_review = sum(float(e.get("reviewer_time", 0) or 0) for e in doc_entries)
+        total_activity = sum(float(e.get("activity_time", 0) or 0) for e in other_entries)
+        total_leave = sum(float(e.get("time", 0) or 0) for e in leave_entries)
+        grand_total = total_work + total_review + total_activity + total_leave
+
+        if grand_total:
+            _write_template_cell(ws, row, 31, grand_total, REF_ROW)
+
+        leave_val = ", ".join(e.get("leave_travel_type", "") for e in leave_entries) if leave_entries else ""
+        if leave_val:
+            _write_template_cell(ws, row, 29, leave_val, REF_ROW)
+
+
+def _build_from_template(entries, template_bytes):
+    try:
+        from io import BytesIO
+        buf = BytesIO(template_bytes)
+        wb = load_workbook(buf, keep_vba=True)
+        _preserve_vba = hasattr(wb, 'vbaProject') and wb.vbaProject is not None
+    except Exception:
+        return _build_from_scratch(entries)
+    ws = wb.active
+
+    if _has_two_row_header(ws):
+        return _build_from_template_2row(entries, wb)
+
+    HEADER_ROW = 1
+    DATA_START = 2
+
+    col_map = _build_column_map(ws, ALL_HEADER_MAP)
+    if not col_map:
+        _write_positional_fallback(ws, entries)
+        output = _save_workbook(wb)
+        return output, _preserve_vba
+
+    date_col = None
+    if "date" in col_map:
+        date_col = col_map["date"][0]
+        date_row_map = _build_date_row_map(ws, date_col)
+    else:
+        date_row_map = {}
+
+    for entry in entries:
+        entry_date = entry.get("date", "")
+        if not entry_date:
+            continue
+        row = date_row_map.get(entry_date)
+        if row is None:
+            continue
+        for field, col_list in col_map.items():
+            if field == "date":
+                continue
+            col = col_list[0]
+            if field == "total_time":
+                wt = float(entry.get("work_time", 0) or 0)
+                rt = float(entry.get("reviewer_time", 0) or 0)
+                at = float(entry.get("activity_time", 0) or 0)
+                val = wt + rt + at
+                if val:
+                    _write_template_cell(ws, row, col, val, HEADER_ROW)
+            else:
+                val = entry.get(field)
+                if val:
+                    _write_template_cell(ws, row, col, val, HEADER_ROW)
+
+    output = _save_workbook(wb)
+    return output, _preserve_vba
+
+
+def _build_from_template_2row(entries, wb):
+    ws = wb.active
+    HEADER_ROW = 2
+    DATA_START = 3
+
+    col_map = _build_column_map_two_row(ws, ALL_HEADER_MAP)
+    if not col_map:
+        _write_positional_fallback(ws, entries)
+        output = _save_workbook(wb)
+        return output, False
+
+    date_col = None
+    if "date" in col_map and col_map["date"]:
+        date_col = col_map["date"][0]
+        date_row_map = _build_date_row_map(ws, date_col)
+    else:
+        date_row_map = {}
+
+    def get_col(field, slot_index):
+        lst = col_map.get(field, [])
+        if slot_index < len(lst):
+            return lst[slot_index]
+        return None
+
+    grouped = {}
+    for e in entries:
+        d = e.get("date", "")
+        if d not in grouped:
+            grouped[d] = []
+        grouped[d].append(e)
+
+    for date_str, day_entries in grouped.items():
+        row = date_row_map.get(date_str)
+        if row is None:
+            continue
+        doc_entries = [e for e in day_entries if e.get("activity_type") not in ("other", "leave_travel")]
+        other_entries = [e for e in day_entries if e.get("activity_type") == "other"]
+        leave_entries = [e for e in day_entries if e.get("activity_type") == "leave_travel"]
+
+        name_val = doc_entries[0].get("user_name", "") if doc_entries else (other_entries[0].get("user_name", "") if other_entries else (leave_entries[0].get("user_name", "") if leave_entries else ""))
+        if name_val:
+            if "user_name" in col_map and col_map["user_name"]:
+                _write_template_cell(ws, row, col_map["user_name"][0], name_val, HEADER_ROW)
+
+        if leave_entries:
+            leave_val = ", ".join(e.get("leave_travel_type", "") for e in leave_entries)
+            if leave_val:
+                if "leave_travel" in col_map and col_map["leave_travel"]:
+                    _write_template_cell(ws, row, col_map["leave_travel"][0], leave_val, HEADER_ROW)
+
+        doc_fields = ["project_id", "doc_task_type", "doc_id", "doc_version",
+                      "doc_type", "work_time", "reviewer_time", "doc_status"]
 
         for slot_i in range(2):
             entry = doc_entries[slot_i] if slot_i < len(doc_entries) else None
@@ -390,12 +605,9 @@ def _build_from_template_2row(entries, wb, template_bytes):
                 if col is None:
                     continue
                 if entry:
-                    val = entry.get(field, "")
-                    if val is None:
-                        val = ""
-                else:
-                    val = ""
-                ws.cell(row=next_row, column=col, value=val)
+                    val = entry.get(field)
+                    if val:
+                        _write_template_cell(ws, row, col, val, HEADER_ROW)
 
         act_fields = ["activity_code", "project_id", "activity_time"]
 
@@ -406,21 +618,18 @@ def _build_from_template_2row(entries, wb, template_bytes):
                 if col is None:
                     continue
                 if entry:
-                    val = entry.get(field, "")
-                    if val is None:
-                        val = ""
-                else:
-                    val = ""
-                ws.cell(row=next_row, column=col, value=val)
+                    val = entry.get(field)
+                    if val:
+                        _write_template_cell(ws, row, col, val, HEADER_ROW)
 
-        work_location = ""
         locations = set()
         for e in day_entries:
             loc = e.get("work_location", "")
             if loc:
                 locations.add(loc)
         if locations:
-            work_location = ", ".join(sorted(locations))
+            if "work_location" in col_map and col_map["work_location"]:
+                _write_template_cell(ws, row, col_map["work_location"][0], ", ".join(sorted(locations)), HEADER_ROW)
 
         total_work = sum(float(e.get("work_time", 0) or 0) for e in doc_entries)
         total_review = sum(float(e.get("reviewer_time", 0) or 0) for e in doc_entries)
@@ -428,39 +637,22 @@ def _build_from_template_2row(entries, wb, template_bytes):
         total_leave = sum(float(e.get("time", 0) or 0) for e in leave_entries)
         grand_total = total_work + total_review + total_activity + total_leave
 
-        if "work_location" in col_map and col_map["work_location"]:
-            ws.cell(row=next_row, column=col_map["work_location"][0], value=work_location)
+        if grand_total:
+            if "total_hours" in col_map and col_map["total_hours"]:
+                _write_template_cell(ws, row, col_map["total_hours"][0], grand_total, HEADER_ROW)
 
-        if "total_hours" in col_map and col_map["total_hours"]:
-            ws.cell(row=next_row, column=col_map["total_hours"][0], value=grand_total)
+        if total_activity:
+            if "act_summary_time" in col_map and col_map["act_summary_time"]:
+                _write_template_cell(ws, row, col_map["act_summary_time"][0], total_activity, HEADER_ROW)
 
-        if "act_summary_time" in col_map and col_map["act_summary_time"]:
-            ws.cell(row=next_row, column=col_map["act_summary_time"][0], value=total_activity)
-        else:
-            ws.cell(row=next_row, column=30, value=total_activity).border = THIN_BORDER
-
-        next_row += 1
-
-    is_macro = _is_xlsm(template_bytes) if template_bytes else False
-    ext = ".xlsm" if is_macro else ".xlsx"
-
-    tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-    try:
-        tmp.close()
-        wb.save(tmp.name)
-        with open(tmp.name, "rb") as f:
-            output = io.BytesIO(f.read())
-        output.seek(0)
-    finally:
-        os.unlink(tmp.name)
-
-    return output, is_macro
+    output = _save_workbook(wb)
+    return output, False
 
 
 def _write_scratch_headers(ws):
     row1_groups = [
-        (1, 1, "Name"),
-        (2, 2, "Date"),
+        (1, 1, "Date"),
+        (2, 2, "Name"),
         (3, 10, "Project Document Work (Prepare, Check, Review, Mentoring)-#1"),
         (11, 18, "Project Document Work (Prepare, Check, Review, Mentoring)-#2"),
         (19, 27, "Other Project Activity or Non-Revenue Activity"),
@@ -481,8 +673,8 @@ def _write_scratch_headers(ws):
                 ws.cell(row=1, column=c).border = THIN_BORDER
 
     row2_headers = [
-        ("Name", 1),
-        ("Date", 2),
+        ("Date", 1),
+        ("Name", 2),
         ("Project ID #1", 3),
         ("Document Task Type (P= Prepare or C=Check)", 4),
         ("Doc ID", 5),
@@ -522,7 +714,7 @@ def _write_scratch_headers(ws):
         cell.alignment = HEADER_ALIGNMENT
         cell.border = THIN_BORDER
 
-    widths = [20, 14, 14, 16, 22, 14, 12, 12, 14, 14, 14, 16, 22, 14, 12, 12, 14, 14, 18, 18, 14, 18, 18, 14, 18, 18, 14, 14, 14, 14, 14, 20]
+    widths = [14, 20, 14, 16, 22, 14, 12, 12, 14, 14, 14, 16, 22, 14, 12, 12, 14, 14, 18, 18, 14, 18, 18, 14, 18, 18, 14, 14, 14, 14, 14, 20]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -556,8 +748,8 @@ def _build_from_scratch(entries):
             c.border = THIN_BORDER
             c.alignment = Alignment(vertical="center")
 
-        set_cell(1, user_name)
-        set_cell(2, date_str)
+        set_cell(1, date_str)
+        set_cell(2, user_name)
 
         doc_fields = ["project_id", "doc_task_type", "doc_id", "doc_version",
                       "doc_type", "work_time", "reviewer_time", "doc_status"]
@@ -625,17 +817,26 @@ def _build_workbook(entries, template_bytes=None):
     return _build_from_scratch(entries)
 
 
-def generate_excel(entries, upload_template_bytes=None):
+def _get_template_filename():
+    user = session.get("user", {})
+    email = user.get("email", "unknown")
+    name = settings_store.get_template_filename(email)
+    return name if name else None
+
+
+def generate_excel(entries, upload_template_bytes=None, target_filename=None):
     user = session.get("user", {})
     email = user.get("email", "unknown")
     folder_id = _ensure_documents_folder()
 
     workbook_bytes, is_macro = _build_workbook(entries, upload_template_bytes)
-    filename = _excel_filename(email, is_macro)
+    if not target_filename:
+        target_filename = _get_template_filename()
+    filename = target_filename or _excel_filename(email, is_macro)
     content = workbook_bytes.read()
 
     folder_children = requests.get(
-        f"{GRAPH_BASE}/me/drive/items/{folder_id}/children",
+        f"{GRAPH_BASE}{_get_drive_base()}/items/{folder_id}/children",
         headers=_headers(),
     )
     existing_id = None
@@ -647,19 +848,132 @@ def generate_excel(entries, upload_template_bytes=None):
 
     if existing_id:
         resp = requests.put(
-            f"{GRAPH_BASE}/me/drive/items/{existing_id}/content",
-            headers=_headers(), data=content,
+            f"{GRAPH_BASE}{_get_drive_base()}/items/{existing_id}/content",
+            headers=_xls_headers(filename), data=content,
         )
     else:
         resp = requests.put(
-            f"{GRAPH_BASE}/me/drive/items/{folder_id}:/{filename}:/content",
-            headers=_headers(), data=content,
+            f"{GRAPH_BASE}{_get_drive_base()}/items/{folder_id}:/{filename}:/content",
+            headers=_xls_headers(filename), data=content,
         )
 
     if _handle_errors(resp):
-        return generate_excel(entries, upload_template_bytes)
+        return generate_excel(entries, upload_template_bytes, target_filename)
 
     return resp.ok, resp.json().get("id") if resp.ok else None
+
+
+def list_folder_files():
+    folder_id = _ensure_documents_folder()
+    if not folder_id:
+        return []
+    resp = requests.get(
+        f"{GRAPH_BASE}{_get_drive_base()}/items/{folder_id}/children",
+        headers=_headers(),
+    )
+    if not resp.ok:
+        if _handle_errors(resp):
+            return list_folder_files()
+        return []
+    files = []
+    for child in resp.json().get("value", []):
+        name = child.get("name", "")
+        is_folder = child.get("folder") is not None
+        item = {
+            "id": child.get("id"),
+            "name": name,
+            "size": child.get("size", 0),
+            "modified": child.get("lastModifiedDateTime", ""),
+            "folder": is_folder,
+        }
+        if name.lower().endswith((".xlsm", ".xlsx")):
+            item["type"] = "file"
+            files.append(item)
+    files.sort(key=lambda f: f["modified"], reverse=True)
+    return files
+
+
+def _download_file_content(folder_id, filename, drive_base=None):
+    if drive_base is None:
+        drive_base = _get_drive_base()
+    resp = requests.get(
+        f"{GRAPH_BASE}{drive_base}/items/{folder_id}:/{filename}:/content",
+        headers=_headers(),
+    )
+    if resp.ok:
+        return resp.content
+    if _handle_errors(resp):
+        return _download_file_content(folder_id, filename, drive_base)
+    return None
+
+
+def _run_drive_op(entries, filename, drive_base):
+    """Execute save-to-file against a given drive base. Returns (ok, detail)."""
+    folder_id = _ensure_documents_folder(drive_base)
+    if not folder_id:
+        return False, "Could not find or create the target folder"
+
+    # Save as .xlsx — change extension from .xlsm if needed
+    xlsx_name = filename[:-5] + ".xlsx" if filename.lower().endswith(".xlsm") else filename
+
+    # Download the picked file (destination)
+    existing = _download_file_content(folder_id, filename, drive_base)
+    if existing is None and filename != xlsx_name:
+        existing = _download_file_content(folder_id, xlsx_name, drive_base)
+
+    if not existing:
+        return False, f"File '{filename}' not found on OneDrive"
+
+    # Try to download the template file for its format (uncorrupted original)
+    user = session.get("user", {})
+    email = user.get("email", "unknown")
+    template_bytes = None
+    for ext_is_macro in [True, False]:
+        tn = f"template_{_excel_filename(email, ext_is_macro)}"
+        tb = _download_file_content(folder_id, tn, drive_base)
+        if tb:
+            template_bytes = tb
+            break
+
+    if template_bytes:
+        workbook_bytes, _ = _build_from_template(entries, template_bytes)
+    else:
+        workbook_bytes, _ = _build_from_template(entries, existing)
+    content = workbook_bytes.read()
+    print(f"[_run_drive_op] Generated xlsx = {len(content)} bytes, entries={len(entries)}")
+
+    upload_headers = _headers()
+    upload_headers["Content-Type"] = _XLSX_MIME
+
+    # Delete old .xlsm file if it exists (to avoid stale cached metadata)
+    folder_children = requests.get(
+        f"{GRAPH_BASE}{drive_base}/items/{folder_id}/children",
+        headers=_headers(),
+    )
+    if folder_children.ok:
+        for child in folder_children.json().get("value", []):
+            if child.get("name") in (filename, xlsx_name):
+                requests.delete(
+                    f"{GRAPH_BASE}{drive_base}/items/{child['id']}",
+                    headers=_headers(),
+                )
+
+    # Create new .xlsx file
+    resp = requests.put(
+        f"{GRAPH_BASE}{drive_base}/items/{folder_id}:/{xlsx_name}:/content",
+        headers=upload_headers, data=content,
+    )
+    print(f"[_run_drive_op] PUT {xlsx_name} → {resp.status_code}, size={len(content)} bytes")
+
+    if _handle_errors(resp):
+        return _run_drive_op(entries, filename, drive_base)
+    if not resp.ok:
+        return False, f"Graph API error {resp.status_code}: {resp.text[:300]}"
+    return True, resp.json().get("id")
+
+
+def save_entries_to_file(entries, filename):
+    return _run_drive_op(entries, filename, _get_drive_base())
 
 
 def download_excel():
@@ -667,15 +981,21 @@ def download_excel():
     email = user.get("email", "unknown")
     folder_id = _ensure_documents_folder()
 
+    original_name = _get_template_filename()
+    filenames_to_try = [original_name] if original_name else []
     for is_macro in (False, True):
-        filename = _excel_filename(email, is_macro)
+        filenames_to_try.append(_excel_filename(email, is_macro))
+
+    for filename in filenames_to_try:
+        if not filename:
+            continue
         resp = requests.get(
-            f"{GRAPH_BASE}/me/drive/items/{folder_id}:/{filename}:/content",
+            f"{GRAPH_BASE}{_get_drive_base()}/items/{folder_id}:/{filename}:/content",
             headers=_headers(),
         )
         if resp.ok:
             meta_resp = requests.get(
-                f"{GRAPH_BASE}/me/drive/items/{folder_id}:/{filename}",
+                f"{GRAPH_BASE}{_get_drive_base()}/items/{folder_id}:/{filename}",
                 headers=_headers(),
             )
             meta = meta_resp.json() if meta_resp.ok else {}
@@ -691,11 +1011,13 @@ def upload_template(file_bytes, filename):
     user = session.get("user", {})
     email = user.get("email", "unknown")
     folder_id = _ensure_documents_folder()
+    if not folder_id:
+        return False, "Could not find or create the target folder"
     is_macro = filename.lower().endswith(".xlsm") if filename else False
     template_name = f"template_{_excel_filename(email, is_macro)}"
 
     folder_children = requests.get(
-        f"{GRAPH_BASE}/me/drive/items/{folder_id}/children",
+        f"{GRAPH_BASE}{_get_drive_base()}/items/{folder_id}/children",
         headers=_headers(),
     )
     existing_id = None
@@ -707,18 +1029,22 @@ def upload_template(file_bytes, filename):
 
     if existing_id:
         resp = requests.put(
-            f"{GRAPH_BASE}/me/drive/items/{existing_id}/content",
-            headers=_headers(), data=file_bytes,
+            f"{GRAPH_BASE}{_get_drive_base()}/items/{existing_id}/content",
+            headers=_xls_headers(filename), data=file_bytes,
         )
     else:
         resp = requests.put(
-            f"{GRAPH_BASE}/me/drive/items/{folder_id}:/{template_name}:/content",
-            headers=_headers(), data=file_bytes,
+            f"{GRAPH_BASE}{_get_drive_base()}/items/{folder_id}:/{template_name}:/content",
+            headers=_xls_headers(filename), data=file_bytes,
         )
 
     if _handle_errors(resp):
         return upload_template(file_bytes, filename)
-    return resp.ok
+    if not resp.ok:
+        return False, f"Graph API error {resp.status_code}: {resp.text[:200]}"
+
+    settings_store.set_template_filename(email, filename)
+    return True, filename
 
 
 def download_template():
@@ -729,7 +1055,7 @@ def download_template():
     for ext in (".xlsm", ".xlsx"):
         template_name = f"template_{_excel_filename(email, ext == '.xlsm')}"
         resp = requests.get(
-            f"{GRAPH_BASE}/me/drive/items/{folder_id}:/{template_name}:/content",
+            f"{GRAPH_BASE}{_get_drive_base()}/items/{folder_id}:/{template_name}:/content",
             headers=_headers(),
         )
         if resp.ok:
@@ -748,12 +1074,18 @@ def get_document_info():
 
     info = {"has_document": False, "has_template": False, "document_name": "", "entries_count": 0}
 
+    original_name = _get_template_filename()
+    filenames_to_check = [original_name] if original_name else []
     for ext_is_macro, ext in [(False, ".xlsx"), (True, ".xlsm")]:
-        filename = _excel_filename(email, ext_is_macro)
-        template_name = f"template_{filename}"
+        fn = _excel_filename(email, ext_is_macro)
+        if fn not in filenames_to_check:
+            filenames_to_check.append(fn)
 
+    for filename in filenames_to_check:
+        if not filename:
+            continue
         resp = requests.get(
-            f"{GRAPH_BASE}/me/drive/items/{folder_id}:/{filename}",
+            f"{GRAPH_BASE}{_get_drive_base()}/items/{folder_id}:/{filename}",
             headers=_headers(),
         )
         if resp.ok:
@@ -768,7 +1100,7 @@ def get_document_info():
     for ext_is_macro, ext in [(False, ".xlsx"), (True, ".xlsm")]:
         template_name = f"template_{_excel_filename(email, ext_is_macro)}"
         template_resp = requests.get(
-            f"{GRAPH_BASE}/me/drive/items/{folder_id}:/{template_name}",
+            f"{GRAPH_BASE}{_get_drive_base()}/items/{folder_id}:/{template_name}",
             headers=_headers(),
         )
         if template_resp.ok:

@@ -452,46 +452,42 @@ body {
 
 /* ---- Document Manager ---- */
 .document-manager {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  display: flex;
+  flex-direction: column;
   gap: 24px;
 }
 
-@media (max-width: 768px) {
-  .document-manager {
-    grid-template-columns: 1fr;
-  }
+.doc-layout {
+  max-width: 720px;
 }
 
-.document-info-panel,
-.document-upload-panel {
+.doc-main-panel {
   background: #fff;
   border-radius: 12px;
-  padding: 24px;
+  padding: 32px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
-.document-info-panel h2,
-.document-upload-panel h2 {
-  font-size: 18px;
+.doc-main-panel h2 {
+  font-size: 20px;
   margin-bottom: 8px;
 }
 
 .doc-desc {
-  font-size: 13px;
+  font-size: 14px;
   color: #6b7280;
-  margin-bottom: 20px;
-  line-height: 1.5;
+  margin-bottom: 24px;
+  line-height: 1.6;
 }
 
 .doc-status {
-  margin-bottom: 20px;
+  margin: 20px 0;
 }
 
 .doc-status-row {
   display: flex;
   justify-content: space-between;
-  padding: 8px 0;
+  padding: 10px 0;
   border-bottom: 1px solid #f3f4f6;
   font-size: 14px;
 }
@@ -515,8 +511,9 @@ body {
 
 .doc-actions {
   display: flex;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 10px;
+  margin-top: 20px;
+  flex-wrap: wrap;
 }
 
 .loading-card {
@@ -529,20 +526,40 @@ body {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
+/* ---- Upload Area ---- */
 .upload-area {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 12px;
-  padding: 32px;
+  padding: 40px 32px;
   border: 2px dashed #d1d5db;
   border-radius: 12px;
   background: #fafafa;
-  transition: border-color 0.2s;
+  transition: all 0.2s;
+  cursor: pointer;
 }
 
 .upload-area:hover {
   border-color: #4f46e5;
+  background: #f5f3ff;
+}
+
+.upload-icon {
+  margin-bottom: 4px;
+}
+
+.upload-text {
+  font-size: 15px;
+  font-weight: 500;
+  color: #374151;
+  text-align: center;
+}
+
+.upload-hint {
+  font-size: 13px;
+  color: #9ca3af;
+  margin-bottom: 4px;
 }
 
 .file-input {
@@ -570,7 +587,7 @@ body {
 .success {
   color: #059669;
   font-size: 13px;
-  margin-bottom: 8px;
+  margin-top: 12px;
   padding: 8px 12px;
   background: #ecfdf5;
   border-radius: 6px;
@@ -785,3 +802,5 @@ body {
   color: #9ca3af;
   padding: 24px !important;
 }
+
+

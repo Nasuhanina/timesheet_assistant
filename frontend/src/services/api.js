@@ -1,4 +1,8 @@
-const BASE = process.env.REACT_APP_API_URL || "http://localhost:5000";
+const BASE =
+  process.env.REACT_APP_API_URL ||
+  (window.location.hostname === 'localhost'
+    ? 'http://localhost:5000'
+    : window.location.origin);
 
 function triggerSessionExpired() {
   window.dispatchEvent(new CustomEvent("session-expired"));
@@ -100,6 +104,32 @@ export function confirmGptbotsEntry(entry, message) {
   return request("/api/timesheet/chat-gptbots", {
     method: "POST",
     body: JSON.stringify({ message, confirm_entry: entry }),
+  });
+}
+
+// ── File Picker ────────────────────────────────────────────────
+
+export function listFolderFiles() {
+  return request("/api/timesheet/documents/list");
+}
+
+export function saveEntriesToFile(filename) {
+  return request("/api/timesheet/documents/save-to-file", {
+    method: "POST",
+    body: JSON.stringify({ filename }),
+  });
+}
+
+// ── Settings ───────────────────────────────────────────────────
+
+export function getSettingsPath() {
+  return request("/api/timesheet/settings/path");
+}
+
+export function setSettingsPath(path) {
+  return request("/api/timesheet/settings/path", {
+    method: "PUT",
+    body: JSON.stringify({ path }),
   });
 }
 

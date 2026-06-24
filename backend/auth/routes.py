@@ -13,10 +13,14 @@ def login():
     state = str(uuid.uuid4())
     session["oauth_state"] = state
 
+    redirect_uri = Config.MICROSOFT_REDIRECT_URI
+    if Config.IS_CLOUD_RUN:
+        redirect_uri = request.url_root.rstrip("/") + "/auth/callback"
+
     params = {
         "client_id": Config.MICROSOFT_CLIENT_ID,
         "response_type": "code",
-        "redirect_uri": Config.MICROSOFT_REDIRECT_URI,
+        "redirect_uri": redirect_uri,
         "response_mode": "query",
         "scope": " ".join(Config.MICROSOFT_SCOPE),
         "state": state,
@@ -44,11 +48,15 @@ def callback():
 
     token_url = f"{Config.MICROSOFT_AUTHORITY}/oauth2/v2.0/token"
 
+    redirect_uri = Config.MICROSOFT_REDIRECT_URI
+    if Config.IS_CLOUD_RUN:
+        redirect_uri = request.url_root.rstrip("/") + "/auth/callback"
+
     data = {
         "client_id": Config.MICROSOFT_CLIENT_ID,
         "client_secret": Config.MICROSOFT_CLIENT_SECRET,
         "code": code,
-        "redirect_uri": Config.MICROSOFT_REDIRECT_URI,
+        "redirect_uri": redirect_uri,
         "grant_type": "authorization_code",
         "scope": " ".join(Config.MICROSOFT_SCOPE),
     }
@@ -72,7 +80,10 @@ def callback():
     user_info = _get_user_info(access_token)
     session["user"] = user_info
 
-    return redirect(f"{Config.FRONTEND_URL}/dashboard")
+    frontend_url = Config.FRONTEND_URL
+    if Config.IS_CLOUD_RUN:
+        frontend_url = request.url_root.rstrip("/")
+    return redirect(f"{frontend_url}/dashboard")
 
 
 @auth_bp.route("/me")

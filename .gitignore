@@ -9,3 +9,6 @@ venv/
 dist/
 .DS_Store
 *.token_store.json
+.env*
+*/.settings_store.json
+

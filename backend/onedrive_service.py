@@ -4,6 +4,7 @@ from flask import session
 import requests
 from config import Config
 from token_store import get as get_tokens, pop as pop_tokens
+import settings_store
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
@@ -20,7 +21,30 @@ def _get_access_token():
 
 def _headers():
     token, _ = _get_access_token()
-    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _find_drive_from_items(items, site_path_like):
+    for item in items:
+        remote = item.get("remoteItem") or item
+        web_url = remote.get("webUrl", "")
+        parent = remote.get("parentReference", {})
+        if parent.get("driveType") != "documentLibrary":
+            continue
+        if site_path_like in web_url:
+            drive_id = parent.get("driveId")
+            if drive_id:
+                return drive_id
+    return None
+
+
+def _get_data_drive():
+    """Always use personal OneDrive for JSON data storage (reliable with Files.ReadWrite)."""
+    return "/me/drive"
+
+
+def _get_drive_base():
+    return "/me/drive"
 
 
 def _refresh_token():
@@ -55,40 +79,19 @@ def _handle_errors(resp):
     return False
 
 
+def _get_effective_path():
+    user = session.get("user", {})
+    email = user.get("email", "")
+    if email:
+        custom = settings_store.get_timesheet_path(email)
+        if custom:
+            return custom
+    return Config.ONEDRIVE_ROOT_PATH
+
+
 def _ensure_timesheets_folder():
-    path = Config.ONEDRIVE_ROOT_PATH.strip("/")
-    parts = path.split("/")
-    folder_id = None
-
-    for part in parts:
-        parent_path = f"/drive/root:{path}" if folder_id is None else ""
-        current_path = f"/drive/root:/{path}" if not folder_id else ""
-
-        if not folder_id:
-            resp = requests.get(
-                f"{GRAPH_BASE}/me/drive/root:/{path}",
-                headers=_headers(),
-            )
-            if resp.ok:
-                folder_id = resp.json().get("id")
-                continue
-
-        create_resp = requests.post(
-            f"{GRAPH_BASE}/me/drive/items/{folder_id or 'root'}/children",
-            headers=_headers(),
-            json={"name": part, "folder": {}, "@microsoft.graph.conflictBehavior": "fail"},
-        )
-        if create_resp.status_code in (200, 201):
-            folder_id = create_resp.json().get("id")
-        else:
-            existing = requests.get(
-                f"{GRAPH_BASE}/me/drive/root:/{path}",
-                headers=_headers(),
-            )
-            if existing.ok:
-                folder_id = existing.json().get("id")
-
-    return folder_id
+    """Return the drive root — save JSON files at root level to avoid folder-creation issues."""
+    return "root"
 
 
 def save_timesheet(timesheet_data):
@@ -97,15 +100,13 @@ def save_timesheet(timesheet_data):
     timesheet_data["user_email"] = email
     timesheet_data["updated_at"] = datetime.utcnow().isoformat()
 
-    folder_id = _ensure_timesheets_folder()
-    if not folder_id:
-        raise RuntimeError("Could not create/find OneDrive Timesheets folder")
-
+    drive = _get_data_drive()
     filename = f"timesheet_{email.replace('@', '_at_')}.json"
     content = json.dumps(timesheet_data, indent=2).encode()
 
+    # Check if file already exists
     folder_children = requests.get(
-        f"{GRAPH_BASE}/me/drive/items/{folder_id}/children",
+        f"{GRAPH_BASE}{drive}/items/root/children",
         headers=_headers(),
     )
     existing_id = None
@@ -117,31 +118,30 @@ def save_timesheet(timesheet_data):
 
     if existing_id:
         resp = requests.put(
-            f"{GRAPH_BASE}/me/drive/items/{existing_id}/content",
-            headers=_headers(), data=content,
+            f"{GRAPH_BASE}{drive}/items/{existing_id}/content",
+            headers={**_headers(), "Content-Type": "application/json"}, data=content,
         )
     else:
         resp = requests.put(
-            f"{GRAPH_BASE}/me/drive/items/{folder_id}:/{filename}:/content",
-            headers=_headers(), data=content,
+            f"{GRAPH_BASE}{drive}/root:/{filename}:/content",
+            headers={**_headers(), "Content-Type": "application/json"}, data=content,
         )
 
     if _handle_errors(resp):
         return save_timesheet(timesheet_data)
+    if not resp.ok:
+        print(f"[save_timesheet] PUT {filename} → {resp.status_code}: {resp.text[:200]}")
     return resp.ok
 
 
 def load_timesheets():
     user = session.get("user", {})
     email = user.get("email", "unknown")
-    folder_id = _ensure_timesheets_folder()
+    drive = _get_data_drive()
     filename = f"timesheet_{email.replace('@', '_at_')}.json"
 
-    if not folder_id:
-        return {"entries": []}
-
     resp = requests.get(
-        f"{GRAPH_BASE}/me/drive/items/{folder_id}:/{filename}:/content",
+        f"{GRAPH_BASE}{drive}/root:/{filename}:/content",
         headers=_headers(),
     )
     if resp.status_code == 404:

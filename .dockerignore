@@ -1,0 +1,11 @@
+.env
+.env.*
+backend/.env
+node_modules/
+__pycache__/
+*.pyc
+.git
+.gitignore
+*.md
+Dockerfile
+docker-compose.yml
