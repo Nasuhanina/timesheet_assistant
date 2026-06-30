@@ -1,6 +1,7 @@
+import os
 import uuid
 import io
-from datetime import datetime
+from datetime import datetime, time
 from flask import Blueprint, request, jsonify, session, send_file
 from onedrive_service import save_timesheet, load_timesheets, _get_effective_path, _get_access_token as _get_onedrive_token
 import onedrive_service
@@ -16,6 +17,10 @@ from document_service import (
     _build_workbook,
     _excel_filename,
     _get_template_filename,
+    _build_column_map_two_row,
+    _build_column_map,
+    ALL_HEADER_MAP,
+    _has_two_row_header,
 )
 import gptbots_service
 import settings_store
@@ -35,11 +40,14 @@ def _auto_generate_document():
         data = load_timesheets()
         entries = data.get("entries", [])
         template_bytes = download_template()
+        if not template_bytes:
+            return None, "No template found"
         ok, doc_id = generate_excel(entries, template_bytes)
         if not ok:
-            print(f"[_auto_generate_document] generate_excel returned False, doc_id={doc_id}")
+            return None, f"generate_excel returned False"
+        return doc_id, None
     except Exception as e:
-        print(f"[_auto_generate_document] Error: {e}")
+        return None, str(e)
 
 
 # ── Entry CRUD ──────────────────────────────────────────────────
@@ -122,8 +130,11 @@ def add_entry():
 
     if not save_timesheet({"entries": entries}):
         return jsonify({"error": "Failed to save entry — check permissions"}), 500
-    _auto_generate_document()
-    return jsonify({"entry": entry, "entries": entries}), 201
+    doc_id, gen_error = _auto_generate_document()
+    resp = {"entry": entry, "entries": entries}
+    if gen_error:
+        resp["generate_warning"] = gen_error
+    return jsonify(resp), 201
 
 
 @timesheet_bp.route("/entries/<entry_id>", methods=["PUT"])
@@ -467,6 +478,79 @@ ACTIVITY_CODE_MAP = [
     (r"d.tracker.*prog|tracker.*progress", "PT2-D-Tracker Prog."),
     (r"trainer|training.*time", "PTR0-Trainer's Time"),
     (r"other.*activity|misc|others", "POA-Others"),
+    (r"mtg.*hq|meeting.*hq", "NM0-Mtg. HQ"),
+    (r"mtg.*gen|meeting.*general", "NM1-Mtg. Gen"),
+    (r"mtg.*fest|meeting.*festival", "NM3-Mtg. Fest."),
+    (r"office.?mgmt|office management", "NOM-Office Mgmt."),
+    (r"pc.*admin", "NKM-PC-Admin"),
+    (r"pc.*recruit|recruitment", "NKM-PC-Recruit"),
+    (r"pc.*payroll|payroll", "NKM-PC-Payroll"),
+    (r"pc.*statutory|statutory", "NKM-PC-Statutory"),
+    (r"pc.*comp.?ben|compensation|benefit", "NKM-PC-CompBen"),
+    (r"pc.*er|employee.?relation", "NKM-PC-ER"),
+    (r"pc.*contract", "NKM-PC-Contract"),
+    (r"pc.*training", "NKM-PC-Training"),
+    (r"pc.*talent|talent", "NKM-PC-Talent"),
+    (r"pc.*ir|industrial.?relation", "NKM-PC-IR"),
+    (r"pc.*policy|policy", "NKM-PC-Policy"),
+    (r"pc.*audit", "NKM-PC-Audit"),
+    (r"pc.*branding|branding", "NKM-PC-Branding"),
+    (r"pc.*wellness|wellness", "NKM-PC-Wellness"),
+    (r"pc.*reporting|reporting", "NKM-PC-Reporting"),
+    (r"admin.*ops|admin operation", "NKM-Admin-Ops"),
+    (r"admin.*facility|facility", "NKM-Admin-Facility"),
+    (r"admin.*support|admin support", "NKM-Admin-Support"),
+    (r"bd.*mtg.*int|bd.*meeting.*internal", "NKM-BD-Mtg-Int"),
+    (r"bd.*mtg.*ext|bd.*meeting.*external", "NKM-BD-Mtg-Ext"),
+    (r"bd.*proposal|proposal", "NKM-BD-Proposal"),
+    (r"bd.*cv|cv.*prep", "NKM-BD-CV"),
+    (r"bd.*tdr|brief|tender.*brief", "NKM-BD-TdrBrief"),
+    (r"bd.*doc.?mgmt|bd.*document", "NKM-BD-DocMgmt"),
+    (r"bd.*other", "NKM-BD-Other"),
+    (r"com.*invoice|commercial.*invoice", "NKM-COM-Invoice"),
+    (r"com.*timesheet|commercial.*timesheet", "NKM-COM-Timesheet"),
+    (r"com.*vendor|vendor.?reg", "NKM-COM-VendorReg"),
+    (r"com.*pay.?mgmt|payment.*mgmt", "NKM-COM-PayMgmt"),
+    (r"com.*contract", "NKM-COM-Contract"),
+    (r"com.*collection|collection", "NKM-COM-Collection"),
+    (r"com.*other", "NKM-COM-Others"),
+    (r"fin.*data.?entry|data entry", "NKM-FIN-DataEntry"),
+    (r"fin.*einvoice|e.?invoice", "NKM-FIN-Einvoice"),
+    (r"fin.*payment|payment", "NKM-FIN-payments"),
+    (r"fin.*budget|budget", "NKM-FIN-Budget"),
+    (r"fin.*cash.?flow|cashflow", "NKM-FIN-Cashflow"),
+    (r"fin.*hq.?report|hq report", "NKM-FIN-HQReport"),
+    (r"fin.*month.?close|month.?end", "NKM-FIN-MonthClose"),
+    (r"fin.*year.?close|year.?end", "NKM-FIN-YearClose"),
+    (r"fin.*tax|tax", "NKM-FIN-Tax"),
+    (r"fin.*ye.?audit|year.?end.?audit", "NKM-FIN-YEAudit"),
+    (r"fin.*audit.?follow|audit follow.?up", "NKM-FIN-AuditFollow"),
+    (r"c.*dev|communication.*development", "NKM-C-Dev"),
+    (r"c.*rep|communication.*report", "NKM-C-Rep"),
+    (r"c.*mtg|communication.*meeting", "NKM-C-Mtg"),
+    (r"c.*awc|award.*ceremony", "NKM-C-Awc"),
+    (r"q.*dc|quality.*doc.?control", "NKM-Q-DC"),
+    (r"q.*aud|quality.*audit", "NKM-Q-Aud"),
+    (r"q.*mtg|quality.*meeting", "NKM-Q-Mtg"),
+    (r"q.*rev|quality.*review", "NKM-Q-Rev"),
+    (r"rm.*rep|risk.*report", "NKM-RM-Rep"),
+    (r"rm.*mtg|risk.*meeting", "NKM-RM-Mtg"),
+    (r"trn.*int|training.*internal", "NKM-TRN-Int"),
+    (r"trn.*hq|training.*hq", "NKM-TRN-HQ"),
+    (r"s.*mtg|strategy.*meeting", "NKM-S-Mtg"),
+    (r"s.*dm|strategy.*decision|decision.?making", "NKM-S-DM"),
+    (r"s.*dev|strategy.*development", "NKM-S-Dev"),
+    (r"s.*rep|strategy.*report", "NKM-S-Rep"),
+    (r"g.*mtg|governance.*meeting", "NKM-G-Mtg"),
+    (r"g.*com|governance.*communication", "NKM-G-Com"),
+    (r"g.*adm|governance.*admin|governance.*administration", "NKM-G-Adm"),
+    (r"data.*viz|visualization", "NKM-DATA-VISUALIZATION"),
+    (r"data.*research|research", "NKM-DATA-RESEARCH"),
+    (r"data.*ai|data.*ml|machine.?learning|artificial.?intelligence", "NKM-DATA-AI&ML"),
+    (r"data.*development|data.*dev", "NKM-DATA-DEVELOPMENT"),
+    (r"data.*doc|data.*documentation", "NKM-DATA-DOCUMENTATION"),
+    (r"data.*internal.*system|internal system", "NKM-DATA-INTERNAL SYSTEM DEVELOPMENT"),
+    (r"noa|other.*activity|misc.*nkm", "NOA-Other"),
 ]
 
 
@@ -741,6 +825,10 @@ def download_document():
         pass
 
     dl_name = _get_template_filename() or _excel_filename(session["user"]["email"], is_macro)
+    # Ensure extension matches actual content
+    base, _ = os.path.splitext(dl_name)
+    dl_ext = ".xlsm" if is_macro else ".xlsx"
+    dl_name = base + dl_ext
     mimetype = "application/vnd.ms-excel.sheet.macroEnabled.12" if is_macro else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     return send_file(
         io.BytesIO(content),
@@ -754,30 +842,41 @@ def download_document():
 def preview_document():
     if not _ensure_authenticated():
         return jsonify({"error": "Not authenticated"}), 401
+    try:
+        def _serialize(v):
+            if v is None:
+                return None
+            if isinstance(v, (datetime, time)):
+                return v.isoformat()
+            return v
 
-    data = load_timesheets()
-    entries = data.get("entries", [])
-    template_bytes = download_template()
-    workbook_bytes, _ = _build_workbook(entries, template_bytes)
+        data = load_timesheets()
+        entries = data.get("entries", [])
+        template_bytes = download_template()
+        workbook_bytes, _ = _build_workbook(entries, template_bytes)
+        if not workbook_bytes:
+            return jsonify({"error": "Failed to build workbook"}), 500
 
-    wb = load_workbook(workbook_bytes, data_only=True)
-    ws = wb.active
+        wb = load_workbook(workbook_bytes, data_only=True)
+        ws = wb.active
 
-    from document_service import _has_two_row_header
-    if _has_two_row_header(ws):
-        headers = [cell.value for cell in ws[2]]
-        rows = []
-        for row in ws.iter_rows(min_row=3, values_only=True):
-            if any(cell is not None for cell in row):
-                rows.append(list(row))
-    else:
-        headers = [cell.value for cell in ws[1]]
-        rows = []
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if any(cell is not None for cell in row):
-                rows.append(list(row))
+        from document_service import _has_two_row_header
+        if _has_two_row_header(ws):
+            headers = [_serialize(cell.value) for cell in ws[2]]
+            rows = []
+            for row in ws.iter_rows(min_row=3, values_only=True):
+                if any(cell is not None for cell in row):
+                    rows.append([_serialize(v) for v in row])
+        else:
+            headers = [_serialize(cell.value) for cell in ws[1]]
+            rows = []
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if any(cell is not None for cell in row):
+                    rows.append([_serialize(v) for v in row])
 
-    return jsonify({"headers": headers, "rows": rows})
+        return jsonify({"headers": headers, "rows": rows})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @timesheet_bp.route("/document/info", methods=["GET"])
@@ -971,3 +1070,86 @@ def set_settings_path():
     email = session["user"]["email"]
     settings_store.set_timesheet_path(email, path)
     return jsonify({"path": path, "is_custom": True})
+
+
+@timesheet_bp.route("/debug-column-mapping", methods=["GET"])
+def debug_column_mapping():
+    if not _ensure_authenticated():
+        return jsonify({"error": "Not authenticated"}), 401
+    try:
+        import io
+        data = load_timesheets()
+        entries = data.get("entries", [])
+        template_bytes = download_template()
+        if not template_bytes:
+            return jsonify({"error": "No template found"}), 404
+
+        wb = load_workbook(io.BytesIO(template_bytes))
+        ws = wb.active
+        is_2row = _has_two_row_header(ws)
+        header_row = 2 if is_2row else 1
+
+        col_map = _build_column_map_two_row(ws, ALL_HEADER_MAP) if is_2row else _build_column_map(ws, ALL_HEADER_MAP)
+        if not is_2row:
+            col_map = {k: [v] for k, v in col_map.items()}
+
+        col_map_str = {}
+        for field, cols in sorted(col_map.items()):
+            header_vals = []
+            for c in cols:
+                cell_val = str(ws.cell(row=header_row, column=c).value or "")[:40]
+                header_vals.append({"col": c, "header": cell_val})
+            col_map_str[field] = header_vals
+
+        act_fields = ["activity_code", "project_id", "activity_time"]
+        slot_info = []
+        for slot_i in range(3):
+            slot = {"slot": slot_i, "fields": []}
+            for fi, field in enumerate(act_fields):
+                if field == "project_id":
+                    idx = 2 + slot_i
+                else:
+                    idx = slot_i
+                lst = col_map.get(field, [])
+                col = lst[idx] if idx < len(lst) else None
+                expected = 19 + slot_i * 3 + fi
+                slot["fields"].append({
+                    "field": field,
+                    "col_detected": col,
+                    "col_expected": expected,
+                    "match": col == expected,
+                })
+            slot_info.append(slot)
+
+        other_entries = [e for e in entries if e.get("activity_type") == "other"]
+        sample = []
+        for e in other_entries[:5]:
+            sample.append({
+                "date": e.get("date"),
+                "activity_code": e.get("activity_code"),
+                "project_id": e.get("project_id"),
+                "activity_time": e.get("activity_time"),
+            })
+
+        def get_cell(r, c):
+            return str(ws.cell(row=r, column=c).value or "")
+
+        header_vals = [get_cell(header_row, c) for c in range(19, 28)]
+        data_rows = []
+        for r in range(header_row + 1, ws.max_row + 1):
+            date_val = get_cell(r, 1)
+            vals = [get_cell(r, c) for c in range(19, 28)]
+            if any(v for v in vals):
+                data_rows.append({"date": date_val, "cols_19_27": vals})
+
+        return jsonify({
+            "is_2row_header": is_2row,
+            "col_map": col_map_str,
+            "slot_mapping": slot_info,
+            "sample_other_entries": sample,
+            "template_headers_19_27": header_vals,
+            "data_rows": data_rows,
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500

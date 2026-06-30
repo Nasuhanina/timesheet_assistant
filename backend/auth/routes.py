@@ -13,9 +13,7 @@ def login():
     state = str(uuid.uuid4())
     session["oauth_state"] = state
 
-    redirect_uri = Config.MICROSOFT_REDIRECT_URI
-    if Config.IS_CLOUD_RUN:
-        redirect_uri = request.url_root.rstrip("/") + "/auth/callback"
+    redirect_uri = request.url_root.rstrip("/") + "/auth/callback"
 
     params = {
         "client_id": Config.MICROSOFT_CLIENT_ID,
@@ -48,9 +46,7 @@ def callback():
 
     token_url = f"{Config.MICROSOFT_AUTHORITY}/oauth2/v2.0/token"
 
-    redirect_uri = Config.MICROSOFT_REDIRECT_URI
-    if Config.IS_CLOUD_RUN:
-        redirect_uri = request.url_root.rstrip("/") + "/auth/callback"
+    redirect_uri = request.url_root.rstrip("/") + "/auth/callback"
 
     data = {
         "client_id": Config.MICROSOFT_CLIENT_ID,
@@ -80,9 +76,7 @@ def callback():
     user_info = _get_user_info(access_token)
     session["user"] = user_info
 
-    frontend_url = Config.FRONTEND_URL
-    if Config.IS_CLOUD_RUN:
-        frontend_url = request.url_root.rstrip("/")
+    frontend_url = request.url_root.rstrip("/")
     return redirect(f"{frontend_url}/dashboard")
 
 

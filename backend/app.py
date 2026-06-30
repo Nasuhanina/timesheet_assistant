@@ -24,7 +24,10 @@ app.config.update(
     SESSION_COOKIE_PATH="/",
 )
 
-CORS(app, supports_credentials=True, origins=[Config.FRONTEND_URL])
+cors_origins = [Config.FRONTEND_URL]
+if not Config.IS_CLOUD_RUN:
+    cors_origins.append("http://localhost:3000")
+CORS(app, supports_credentials=True, origins=cors_origins)
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(timesheet_bp)

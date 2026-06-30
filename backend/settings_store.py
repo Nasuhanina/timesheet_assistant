@@ -39,24 +39,40 @@ def _write_json(data):
         json.dump(data, f)
 
 
-def get_timesheet_path(user_id: str) -> str | None:
-    if _use_firestore():
+def _firestore_get(user_id: str, field: str):
+    if not _use_firestore():
+        return None
+    try:
         db = _get_db()
         doc = db.collection(COLLECTION).document(user_id).get()
         if doc.exists:
-            return doc.to_dict().get("timesheet_path")
-        return None
+            return doc.to_dict().get(field)
+    except Exception:
+        pass
+    return None
+
+
+def _firestore_set(user_id: str, data: dict):
+    if not _use_firestore():
+        return False
+    try:
+        db = _get_db()
+        db.collection(COLLECTION).document(user_id).set(data, merge=True)
+        return True
+    except Exception:
+        return False
+
+
+def get_timesheet_path(user_id: str) -> str | None:
+    val = _firestore_get(user_id, "timesheet_path")
+    if val is not None:
+        return val
     store = _read_json()
     return store.get(user_id, {}).get("timesheet_path")
 
 
 def set_timesheet_path(user_id: str, path: str):
-    if _use_firestore():
-        db = _get_db()
-        db.collection(COLLECTION).document(user_id).set({
-            "timesheet_path": path,
-        })
-    else:
+    if not _firestore_set(user_id, {"timesheet_path": path}):
         store = _read_json()
         if user_id not in store:
             store[user_id] = {}
@@ -65,23 +81,15 @@ def set_timesheet_path(user_id: str, path: str):
 
 
 def get_template_filename(user_id: str) -> str | None:
-    if _use_firestore():
-        db = _get_db()
-        doc = db.collection(COLLECTION).document(user_id).get()
-        if doc.exists:
-            return doc.to_dict().get("template_filename")
-        return None
+    val = _firestore_get(user_id, "template_filename")
+    if val is not None:
+        return val
     store = _read_json()
     return store.get(user_id, {}).get("template_filename")
 
 
 def set_template_filename(user_id: str, filename: str):
-    if _use_firestore():
-        db = _get_db()
-        db.collection(COLLECTION).document(user_id).set({
-            "template_filename": filename,
-        }, merge=True)
-    else:
+    if not _firestore_set(user_id, {"template_filename": filename}):
         store = _read_json()
         if user_id not in store:
             store[user_id] = {}

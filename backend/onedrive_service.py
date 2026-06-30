@@ -130,7 +130,7 @@ def save_timesheet(timesheet_data):
     if _handle_errors(resp):
         return save_timesheet(timesheet_data)
     if not resp.ok:
-        print(f"[save_timesheet] PUT {filename} → {resp.status_code}: {resp.text[:200]}")
+        pass
     return resp.ok
 
 
