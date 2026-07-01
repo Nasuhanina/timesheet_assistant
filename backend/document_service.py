@@ -480,7 +480,7 @@ def _write_positional_fallback(ws, entries):
 
         for slot_i in range(2):
             entry = doc_entries[slot_i] if slot_i < len(doc_entries) else None
-            base_col = 3 + slot_i * 8
+            base_col = 2 + slot_i * 8
             if entry:
                 for fi, field in enumerate(doc_fields):
                     val = entry.get(field)
@@ -517,15 +517,20 @@ def _write_positional_fallback(ws, entries):
         if locations:
             _write_template_cell(ws, row, 27, ", ".join(sorted(locations)), REF_ROW)
 
+        remarks_list = [e.get("remarks", "") for e in doc_entries + other_entries if e.get("remarks")]
+        if remarks_list:
+            _write_template_cell(ws, row, 31, "; ".join(remarks_list), REF_ROW)
+
         total_work = sum(float(e.get("work_time", 0) or 0) for e in doc_entries)
         total_review = sum(float(e.get("reviewer_time", 0) or 0) for e in doc_entries)
         total_activity = sum(float(e.get("activity_time", 0) or 0) for e in other_entries)
         total_leave = sum(float(e.get("time", 0) or 0) for e in leave_entries)
         grand_total = total_work + total_review + total_activity + total_leave
 
-        if total_activity:
+        total = total_work + total_review + total_activity
+        if total:
             c = ws.cell(row=row, column=30)
-            c.value = total_activity / 24.0
+            c.value = total / 24.0
             c.number_format = 'h:mm'
 
         if total_leave:
@@ -665,6 +670,10 @@ def _build_from_template_2row(entries, wb):
                     val = entry.get(field)
                     if val:
                         _write_template_cell(ws, row, col, val, HEADER_ROW)
+
+        remarks_list = [e.get("remarks", "") for e in doc_entries + other_entries if e.get("remarks")]
+        if remarks_list:
+            _write_template_cell(ws, row, 31, "; ".join(remarks_list), HEADER_ROW)
 
         act_fields = ["activity_code", "project_id", "activity_time"]
 
@@ -817,7 +826,7 @@ def _build_from_scratch(entries):
 
         for slot_i in range(2):
             entry = doc_entries[slot_i] if slot_i < len(doc_entries) else None
-            base_col = 3 + slot_i * 8
+            base_col = 2 + slot_i * 8
             if entry:
                 for fi, field in enumerate(doc_fields):
                     val = entry.get(field, "")
@@ -859,11 +868,14 @@ def _build_from_scratch(entries):
 
         leave_val = ", ".join(e.get("leave_travel_type", "") for e in leave_entries) if leave_entries else ""
 
+        remarks_list = [e.get("remarks", "") for e in doc_entries + other_entries if e.get("remarks")]
+        remarks_val = "; ".join(remarks_list) if remarks_list else ""
+
         set_cell(28, work_location)
         set_cell(29, leave_val)
         set_cell(30, total_activity)
-        set_cell(31, grand_total)
-        set_cell(32, "")
+        set_cell(31, remarks_val)
+        set_cell(32, grand_total)
 
         row += 1
 

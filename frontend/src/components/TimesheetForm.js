@@ -22,6 +22,7 @@ export default function TimesheetForm({ onSaved, refreshKey, activeTab }) {
     activity_code: "",
     activity_time: "",
     work_location: "",
+    remarks: "",
     leave_travel_type: "",
     time: 8.5,
   });
@@ -101,6 +102,7 @@ export default function TimesheetForm({ onSaved, refreshKey, activeTab }) {
         activity_code: "",
         activity_time: "",
         work_location: "",
+        remarks: "",
         leave_travel_type: "",
       time: prev.time || 0,
       }));
@@ -132,6 +134,7 @@ export default function TimesheetForm({ onSaved, refreshKey, activeTab }) {
       activity_code: entry.activity_code || "",
       activity_time: String(entry.activity_time || ""),
       work_location: entry.work_location || "",
+      remarks: entry.remarks || "",
       leave_travel_type: entry.leave_travel_type || "",
       time: 8.5,
     });
@@ -168,6 +171,7 @@ export default function TimesheetForm({ onSaved, refreshKey, activeTab }) {
       activity_code: "",
       activity_time: "",
       work_location: "",
+      remarks: "",
       leave_travel_type: "",
       time: 8.5,
     }));
@@ -180,9 +184,15 @@ export default function TimesheetForm({ onSaved, refreshKey, activeTab }) {
     e.work_time || 0
   ), 0);
 
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth();
   const displayEntries = selectedDate
     ? entries.filter(e => e.date === selectedDate)
-    : entries;
+    : entries.filter(e => {
+        const d = new Date(e.date);
+        return d.getFullYear() === currentYear && d.getMonth() === currentMonth;
+      });
   const calTotal = selectedDate
     ? displayEntries.reduce((sum, e) => sum + (
         e.activity_type === "other" ? e.activity_time :
@@ -391,6 +401,16 @@ export default function TimesheetForm({ onSaved, refreshKey, activeTab }) {
                   <option value="WFH Other">WFH Other</option>
                 </select>
               </div>
+              <div className="form-group">
+                <label>Remarks</label>
+                <textarea
+                  name="remarks"
+                  value={form.remarks}
+                  onChange={handleChange}
+                  placeholder="Any additional notes..."
+                  rows="3"
+                />
+              </div>
             </>
           ) : formTab === "other" ? (
             <>
@@ -579,6 +599,16 @@ export default function TimesheetForm({ onSaved, refreshKey, activeTab }) {
                   <option value="WFH Other">WFH Other</option>
                 </select>
               </div>
+              <div className="form-group">
+                <label>Remarks</label>
+                <textarea
+                  name="remarks"
+                  value={form.remarks}
+                  onChange={handleChange}
+                  placeholder="Any additional notes..."
+                  rows="3"
+                />
+              </div>
             </>
           ) : (
             <>
@@ -658,6 +688,7 @@ export default function TimesheetForm({ onSaved, refreshKey, activeTab }) {
                     <div className="entry-field"><strong>Project:</strong> {entry.project_id || "-"}</div>
                     <div className="entry-field"><strong>Time:</strong> {entry.activity_time}h</div>
                     <div className="entry-field"><strong>Location:</strong> {entry.work_location || "-"}</div>
+                    <div className="entry-field"><strong>Remarks:</strong> {entry.remarks || "-"}</div>
                   </>
                 ) : (
                   <>
@@ -672,6 +703,7 @@ export default function TimesheetForm({ onSaved, refreshKey, activeTab }) {
                     <div className="entry-field"><strong>Reviewer:</strong> {entry.reviewer_time || 0}h</div>
                     <div className="entry-field"><strong>Status:</strong> {entry.doc_status || "-"}</div>
                     <div className="entry-field"><strong>Location:</strong> {entry.work_location || "-"}</div>
+                    <div className="entry-field"><strong>Remarks:</strong> {entry.remarks || "-"}</div>
                   </>
                 )}
                 <div className="entry-actions">

@@ -103,6 +103,7 @@ def add_entry():
         entry["activity_time"] = float(body["activity_time"])
         entry["work_location"] = body.get("work_location", "")
         entry["project_id"] = body.get("project_id", "")
+        entry["remarks"] = body.get("remarks", "")
         entry["leave_travel_type"] = ""
         entry["time"] = 0
     else:
@@ -121,6 +122,7 @@ def add_entry():
         entry["activity_code"] = ""
         entry["activity_time"] = 0
         entry["work_location"] = body.get("work_location", "")
+        entry["remarks"] = body.get("remarks", "")
         entry["leave_travel_type"] = ""
         entry["time"] = 0
 
@@ -174,6 +176,7 @@ def update_entry(entry_id):
                 entry["activity_time"] = float(body.get("activity_time", entry.get("activity_time", 0)))
                 entry["work_location"] = body.get("work_location", entry.get("work_location", ""))
                 entry["project_id"] = body.get("project_id", entry.get("project_id", ""))
+                entry["remarks"] = body.get("remarks", entry.get("remarks", ""))
                 entry["doc_task_type"] = ""
                 entry["doc_id"] = ""
                 entry["doc_version"] = ""
@@ -195,6 +198,7 @@ def update_entry(entry_id):
                 entry["activity_code"] = ""
                 entry["activity_time"] = 0
                 entry["work_location"] = body.get("work_location", entry.get("work_location", ""))
+                entry["remarks"] = body.get("remarks", entry.get("remarks", ""))
                 entry["leave_travel_type"] = ""
                 entry["time"] = 0
             entry["user_name"] = session["user"]["displayName"]
@@ -664,6 +668,7 @@ def chat_gptbots():
             entry["activity_time"] = float(preview_dict.get("activity_time", preview_dict.get("work_time", 0)) or 0)
             entry["work_location"] = preview_dict.get("work_location", "")
             entry["project_id"] = preview_dict.get("project_id", "")
+            entry["remarks"] = preview_dict.get("remarks", "")
             entry["doc_task_type"] = ""
             entry["doc_id"] = ""
             entry["doc_version"] = ""
@@ -682,6 +687,7 @@ def chat_gptbots():
             entry["doc_status"] = preview_dict.get("doc_status", "")
             entry["activity_code"] = ""
             entry["activity_time"] = 0
+            entry["remarks"] = preview_dict.get("remarks", "")
             entry["work_location"] = preview_dict.get("work_location", "")
         entries.append(entry)
         save_timesheet({"entries": entries})
@@ -747,12 +753,12 @@ def chat_gptbots():
         try:
             data = load_timesheets()
             entries = data.get("entries", [])
-            lines = ["id | date | type | project_id | task_type | doc_id | version | doc_type | work_time | reviewer_time | status | activity_code | activity_time | location"]
+            lines = ["id | date | type | project_id | task_type | doc_id | version | doc_type | work_time | reviewer_time | status | activity_code | activity_time | location | remarks"]
             if entries:
                 recent = sorted(entries, key=lambda e: e.get("created_at", ""), reverse=True)[:20]
                 for e in recent:
                     at = e.get("activity_type", "document")
-                    lines.append(f"{e.get('id','')} | {e.get('date','')} | {at} | {e.get('project_id','')} | {e.get('doc_task_type','')} | {e.get('doc_id','')} | {e.get('doc_version','')} | {e.get('doc_type','')} | {e.get('work_time',0)} | {e.get('reviewer_time',0)} | {e.get('doc_status','')} | {e.get('activity_code','')} | {e.get('activity_time',0)} | {e.get('work_location','')}")
+                    lines.append(f"{e.get('id','')} | {e.get('date','')} | {at} | {e.get('project_id','')} | {e.get('doc_task_type','')} | {e.get('doc_id','')} | {e.get('doc_version','')} | {e.get('doc_type','')} | {e.get('work_time',0)} | {e.get('reviewer_time',0)} | {e.get('doc_status','')} | {e.get('activity_code','')} | {e.get('activity_time',0)} | {e.get('work_location','')} | {e.get('remarks','')}")
             else:
                 lines.append("(no entries yet)")
             entry_context = "Here are the current timesheet entries (recent 20):\n" + "\n".join(lines)
@@ -905,6 +911,42 @@ def generate_document():
     if not ok:
         return jsonify({"error": "Failed to generate document"}), 500
     return jsonify({"message": "Document generated successfully", "file_id": doc_id})
+
+
+@timesheet_bp.route("/document/generate-by-month", methods=["POST"])
+def generate_document_by_month():
+    if not _ensure_authenticated():
+        return jsonify({"error": "Not authenticated"}), 401
+
+    body = request.get_json(silent=True)
+    if not body or "year" not in body or "month" not in body:
+        return jsonify({"error": "Missing 'year' or 'month' fields"}), 400
+
+    year = int(body["year"])
+    month = int(body["month"])
+    if month < 1 or month > 12:
+        return jsonify({"error": "Month must be 1-12"}), 400
+
+    data = load_timesheets()
+    all_entries = data.get("entries", [])
+
+    filtered = []
+    for e in all_entries:
+        try:
+            d = datetime.strptime(e.get("date", ""), "%Y-%m-%d")
+            if d.year == year and d.month == month:
+                filtered.append(e)
+        except (ValueError, TypeError):
+            continue
+
+    if not filtered:
+        return jsonify({"error": f"No entries found for {year}-{month:02d}"}), 400
+
+    template_bytes = download_template()
+    ok, doc_id = generate_excel(filtered, template_bytes)
+    if not ok:
+        return jsonify({"error": "Failed to generate document"}), 500
+    return jsonify({"message": f"Document generated for {year}-{month:02d}", "file_id": doc_id, "entry_count": len(filtered)})
 
 
 @timesheet_bp.route("/documents/list", methods=["GET"])

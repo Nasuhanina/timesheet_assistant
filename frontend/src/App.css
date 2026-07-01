@@ -480,6 +480,49 @@ body {
   line-height: 1.6;
 }
 
+.doc-month-section {
+  margin-bottom: 24px;
+  padding: 16px 20px;
+  background: #f9fafb;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+}
+
+.month-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.month-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: #374151;
+}
+
+.month-select {
+  padding: 8px 12px;
+  font-size: 14px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  outline: none;
+  background: #fff;
+  transition: border-color 0.2s;
+  cursor: pointer;
+}
+
+.month-select:focus {
+  border-color: #4f46e5;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+}
+
+.month-count {
+  font-size: 13px;
+  color: #6b7280;
+  margin-left: auto;
+}
+
 .doc-status {
   margin: 20px 0;
 }

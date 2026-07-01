@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   getDocumentInfo,
+  getEntries,
   downloadDocument,
   generateDocument,
+  generateDocumentByMonth,
   uploadDocumentTemplate,
   previewDocument,
 } from "../services/api";
@@ -17,10 +19,20 @@ export default function DocumentManager() {
   const [preview, setPreview] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const fileRef = useRef(null);
+  const now = new Date();
+  const [selectedMonth, setSelectedMonth] = useState(now.getMonth() + 1);
+  const [selectedYear, setSelectedYear] = useState(now.getFullYear());
+  const [generatingMonth, setGeneratingMonth] = useState(false);
+  const [monthEntryCount, setMonthEntryCount] = useState(0);
 
   useEffect(() => {
     loadInfo();
+    loadMonthEntryCount();
   }, []);
+
+  useEffect(() => {
+    loadMonthEntryCount();
+  }, [selectedMonth, selectedYear]);
 
   const loadInfo = async () => {
     try {
@@ -30,6 +42,20 @@ export default function DocumentManager() {
       setInfo(null);
     }
     setLoading(false);
+  };
+
+  const loadMonthEntryCount = async () => {
+    try {
+      const entries = await getEntries();
+      const count = entries.filter((e) => {
+        if (!e.date) return false;
+        const d = new Date(e.date);
+        return d.getFullYear() === selectedYear && d.getMonth() + 1 === selectedMonth;
+      }).length;
+      setMonthEntryCount(count);
+    } catch {
+      setMonthEntryCount(0);
+    }
   };
 
   const handleDownload = async () => {
@@ -61,6 +87,33 @@ export default function DocumentManager() {
     }
     setGenerating(false);
   };
+
+  const handleGenerateByMonth = async () => {
+    setGeneratingMonth(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await generateDocumentByMonth(selectedYear, selectedMonth);
+      setMessage(`Entries for ${selectedYear}-${String(selectedMonth).padStart(2, "0")} written into template (${result.entry_count} entries).`);
+      await loadInfo();
+    } catch (err) {
+      setError(err.message);
+    }
+    setGeneratingMonth(false);
+  };
+
+  const months = [
+    { value: 1, label: "January" }, { value: 2, label: "February" },
+    { value: 3, label: "March" }, { value: 4, label: "April" },
+    { value: 5, label: "May" }, { value: 6, label: "June" },
+    { value: 7, label: "July" }, { value: 8, label: "August" },
+    { value: 9, label: "September" }, { value: 10, label: "October" },
+    { value: 11, label: "November" }, { value: 12, label: "December" },
+  ];
+
+  const years = [];
+  const cy = new Date().getFullYear();
+  for (let y = cy - 2; y <= cy + 1; y++) years.push(y);
 
   const handlePreview = async () => {
     setPreviewLoading(true);
@@ -122,6 +175,23 @@ export default function DocumentManager() {
             original formatting, headers, and layout.
           </p>
 
+          <div className="doc-month-section">
+            <div className="month-picker">
+              <span className="month-label">Month:</span>
+              <select className="month-select" value={selectedMonth} onChange={(e) => setSelectedMonth(Number(e.target.value))}>
+                {months.map((m) => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
+              </select>
+              <select className="month-select" value={selectedYear} onChange={(e) => setSelectedYear(Number(e.target.value))}>
+                {years.map((y) => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </select>
+              <span className="month-count">{monthEntryCount} entries</span>
+            </div>
+          </div>
+
           <div className="upload-area">
             <div className="upload-icon">
               <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#4f46e5" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -161,8 +231,8 @@ export default function DocumentManager() {
               </span>
             </div>
             <div className="doc-status-row">
-              <span className="doc-label">Entries:</span>
-              <span className="doc-value">{info?.entries_count ?? 0}</span>
+              <span className="doc-label">Entries ({months.find(m => m.value === selectedMonth)?.label} {selectedYear}):</span>
+              <span className="doc-value">{monthEntryCount}</span>
             </div>
             {info?.has_document && (
               <>
@@ -205,6 +275,7 @@ export default function DocumentManager() {
               {previewLoading ? "Loading..." : "Preview"}
             </button>
           </div>
+
         </div>
       </div>
 

@@ -83,6 +83,13 @@ export async function generateDocument() {
   return request("/api/timesheet/document/generate", { method: "POST" });
 }
 
+export async function generateDocumentByMonth(year, month) {
+  return request("/api/timesheet/document/generate-by-month", {
+    method: "POST",
+    body: JSON.stringify({ year, month }),
+  });
+}
+
 export async function previewDocument() {
   return request("/api/timesheet/document/preview");
 }
